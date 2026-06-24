@@ -14,6 +14,7 @@ guarantee) are fully testable offline. Every decision is logged.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -53,7 +54,13 @@ class LLMRouter:
         self.completion_fn = completion_fn
         self.log: list[RouteDecision] = []
         if use_litellm is None:
-            use_litellm = completion_fn is None and self._litellm_available()
+            # Off by default (zero-infra, no surprise paid calls). Opt in
+            # explicitly or via env so production can route through LiteLLM.
+            use_litellm = (
+                completion_fn is None
+                and os.environ.get("AAOS_USE_LITELLM", "").lower() in {"1", "true", "yes"}
+                and self._litellm_available()
+            )
         self.use_litellm = use_litellm
 
     @staticmethod
