@@ -59,6 +59,8 @@ event bus, in-memory vector store, mock LLM router). Optional integrations
 | 4 | Meta-Agent: auto-discovery, config wizard, hot-reload | `agile_agentic_os/meta` | `tests/test_stage4_meta_agent.py` |
 | 5 | Proactive triggers, agent-to-agent comms, dynamic LLM routing | `agile_agentic_os/orchestration`, `agile_agentic_os/routing` | `tests/test_stage5_orchestration_routing.py` |
 | opencode backend | MCP stdio bridge, project/agent generation, headless runner | `agile_agentic_os/integrations/opencode` | `tests/test_stage6_opencode_backend.py` |
+| Channels | Telegram + Discord, ChannelManager routing | `agile_agentic_os/channels` | `tests/test_stage7_channels.py` |
+| Onboarding | rich TUI wizard + CLI | `agile_agentic_os/onboarding`, `agile_agentic_os/cli.py` | `tests/test_stage8_onboarding.py` |
 
 ## Dual-Track architecture
 
@@ -98,7 +100,57 @@ Natural-language `proactive_triggers` are compiled by
 events. A deterministic, offline planner is used when no LLM is configured; both
 paths run through `MetaAgent.validate()` which drops any non-existent entity_id.
 
-## Quick start
+## Onboarding (TUI)
+
+A guided wizard (built on **rich**) walks you from zero to a running space:
+
+```bash
+agile-os onboard          # or: python -m agile_agentic_os onboard
+```
+
+It: picks I/O adapters → auto-discovers entities → asks for your lore → runs the
+Meta-Agent → shows the generated characters → exports a runnable opencode project
+→ configures Telegram/Discord → writes a `.env`. The wizard is rendering-agnostic
+(`onboarding/prompter.py`) so it is fully scriptable in tests.
+
+Other CLI commands:
+
+```bash
+agile-os export-opencode "серйозна веб-студія" ./my-space   # generate opencode project
+agile-os serve                                              # run daemon + chat channels (from .env)
+agile-os mcp                                                # run the opencode MCP stdio backend
+```
+
+## Chat channels: Telegram & Discord
+
+`channels/` connects chat platforms to the OS. Inbound messages go through the
+Fast Track (instant commands) and to agents (chatter); agent / slow-track /
+proactive messages are pushed back out to chat.
+
+* **Telegram** (`channels/telegram_channel.py`) — uses **python-telegram-bot**
+  (`telegram.Bot`) when installed, else a raw Bot-API transport over httpx.
+* **Discord** (`channels/discord_channel.py`) — **discord.py** gateway bot for
+  inbound, plus a webhook (httpx) transport for outbound.
+
+Both use a pluggable transport, so they run against the real services with a
+token, or against an injected fake in tests. Human chat users are treated as
+operators (RBAC), while payload limits still apply.
+
+```python
+from agile_agentic_os.orchestration import Orchestrator
+from agile_agentic_os.bridge import HardwareAdapter, SoftwareAdapter
+from agile_agentic_os.channels import ChannelManager, TelegramChannel
+
+orch = Orchestrator()
+orch.add_adapter(HardwareAdapter()); orch.add_adapter(SoftwareAdapter())
+orch.boot("серйозна веб-студія")
+
+manager = ChannelManager(orch)
+manager.add_channel(TelegramChannel(token="<BOT_TOKEN>", default_chat_id="<CHAT_ID>"))
+# await manager.start(); await orch.start(); orch.slow_track.start()
+```
+
+## Library quick start
 
 ```python
 from agile_agentic_os.orchestration import Orchestrator
