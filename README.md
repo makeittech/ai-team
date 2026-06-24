@@ -21,6 +21,44 @@ event bus, in-memory vector store, mock LLM router). Optional integrations
 | 4 | Meta-Agent: auto-discovery, config wizard, hot-reload | `agile_agentic_os/meta` | `tests/test_stage4_meta_agent.py` |
 | 5 | Proactive triggers, agent-to-agent comms, dynamic LLM routing | `agile_agentic_os/orchestration`, `agile_agentic_os/routing` | `tests/test_stage5_orchestration_routing.py` |
 
+## Dual-Track architecture
+
+The OS runs physical actions and agent chatter on two independent lanes:
+
+* **Fast Track** (`routing/fast_track.py`): a lightweight, local intent classifier
+  — regex *or* embedding/vector-search (`VectorIntentClassifier`) — pulls the
+  entity + action out of an utterance, runs it through Guardrails and actuates in
+  ~100 ms, bypassing the main LLM. If the LLM lane dies, the AC still turns off.
+* **Slow Track** (`routing/slow_track.py`): the orchestrator drops the completed
+  action onto an **async agent queue**; the relevant character wakes up a couple
+  of seconds later and posts an in-character reaction to the chat.
+
+## Meta-Agent (creative freedom inside a rigid schema)
+
+`meta/wizard.py` exposes `META_AGENT_SYSTEM_PROMPT` (a Hallucination-Jail +
+Strict-JSON contract for Claude 3.5 Sonnet / GPT-4o) and produces this exact,
+directly-`json.loads`-able shape:
+
+```json
+{
+  "system_domain": {"name": "...", "background_lore": "..."},
+  "agents": [
+    {
+      "id": "petrovych", "name": "Petrovych", "role": "Facilities & Comfort",
+      "tone_of_voice": "Grumbly, thrifty engineer... 'Давно пора, він жере кіловат на годину.'",
+      "permissions": {"read_only_entities": ["sensor.power_total"],
+                       "execute_entities": ["climate.living_room"]},
+      "proactive_triggers": ["when sensor.power_total exceeds 5"]
+    }
+  ]
+}
+```
+
+Natural-language `proactive_triggers` are compiled by
+`orchestration/triggers.py` into structured conditions bound to State-Changed
+events. A deterministic, offline planner is used when no LLM is configured; both
+paths run through `MetaAgent.validate()` which drops any non-existent entity_id.
+
 ## Quick start
 
 ```python
@@ -31,12 +69,12 @@ orch = Orchestrator()
 orch.add_adapter(HardwareAdapter())   # Home Assistant / MQTT abstraction
 orch.add_adapter(SoftwareAdapter())   # GitHub / Jira / Trello webhooks
 
-# Meta-Agent auto-discovers entities and generates the agent org chart.
-config = orch.boot("Smart Home for a family")
-print([a.id for a in config.agents])
+# Meta-Agent auto-discovers entities and generates the character org chart.
+config = orch.boot("серйозна веб-студія")
+print(config.system_domain.name, [a.name for a in config.agents])
 
-# Hot-reload a different domain at runtime (no process restart).
-orch.boot("Production studio")
+# Hot-reload a different lore at runtime (no process restart).
+orch.boot("космічний корабель")
 ```
 
 ## Install & test

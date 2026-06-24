@@ -43,65 +43,77 @@ def test_meta_agent_generates_valid_config_no_hallucination():
     meta = MetaAgent()
     config = meta.generate(entities, "Production studio")
 
-    # Valid JSON round-trip.
+    # Strict JSON round-trip (json.loads directly, as the backend does).
     payload = config.model_dump()
-    text = json.dumps(payload)
+    text = json.dumps(payload, ensure_ascii=False)
     reparsed = OSConfig(**json.loads(text))
-    assert reparsed.domain == "Production studio"
+    assert reparsed.system_domain.name
+    assert reparsed.system_domain.background_lore
 
-    # >= 3 agents.
-    assert len(config.agents) >= 3
-
-    # No hallucinated entity_ids anywhere.
+    # 2 to 4 unique characters (per the Meta-Agent contract).
+    assert 2 <= len(config.agents) <= 4
+    # Each character is fleshed out: name + role + detailed tone with sample phrases.
     for agent in config.agents:
-        for tool in agent.assigned_tools:
-            assert tool in valid_ids, f"hallucinated tool {tool}"
-        for trig in agent.proactive_triggers:
-            assert trig.entity_id in valid_ids
-        for perm in agent.permissions:
-            # permission globs are exact entity ids in the deterministic planner
-            assert perm.entity_glob in valid_ids
+        assert agent.name and agent.role and len(agent.tone_of_voice) > 20
 
-    # Logical distribution: tools are partitioned (no entity owned by 2 agents),
-    # and every entity is assigned to exactly one agent.
+    # No hallucinated entity_ids anywhere (Hallucination Jail).
+    for agent in config.agents:
+        for eid in agent.permissions.all_entities():
+            assert eid in valid_ids, f"hallucinated entity {eid}"
+
+    # Logical distribution: every entity assigned to exactly one agent.
     owners: dict[str, int] = {}
     for agent in config.agents:
-        for tool in agent.assigned_tools:
-            owners[tool] = owners.get(tool, 0) + 1
+        for eid in agent.permissions.all_entities():
+            owners[eid] = owners.get(eid, 0) + 1
     assert all(count == 1 for count in owners.values())
     assert set(owners) == valid_ids
 
-    # Read-only sensors got no write permissions.
+    # RBAC split: read-only sensors never appear in any execute_entities list.
     sensor_ids = {e.entity_id for e in entities if e.kind == EntityKind.SENSOR}
-    granted = {p.entity_glob for a in config.agents for p in a.permissions}
-    assert sensor_ids.isdisjoint(granted)
+    executable = {eid for a in config.agents for eid in a.permissions.execute_entities}
+    assert sensor_ids.isdisjoint(executable)
 
 
 def test_meta_agent_strips_hallucinated_entities_from_llm_output():
     entities = _fifty_mixed_entities()
     valid_ids = {e.entity_id for e in entities}
 
-    fake_llm_json = json.dumps({
-        "domain": "Production studio",
-        "agents": [
-            {"id": "a1", "role": "x", "assigned_tools": ["sensor.0", "ghost.does_not_exist"],
-             "permissions": [], "proactive_triggers": [
-                 {"id": "t1", "entity_id": "ghost.does_not_exist", "reaction": "boo"}]},
-            {"id": "a2", "role": "y", "assigned_tools": ["light.1"], "permissions": [],
-             "proactive_triggers": []},
-            {"id": "a3", "role": "z", "assigned_tools": ["trello.card.3"], "permissions": [],
-             "proactive_triggers": []},
-        ],
-        "limits": [],
-    })
+    # An LLM that ignores instructions: wraps JSON in a markdown fence and
+    # invents a non-existent entity_id.
+    fake_llm_json = """```json
+{
+  "system_domain": {"name": "Studio", "background_lore": "lore"},
+  "agents": [
+    {"id": "a1", "name": "Boris", "role": "Engineer", "tone_of_voice": "grumpy",
+     "permissions": {"read_only_entities": ["sensor.0", "ghost.does_not_exist"],
+                     "execute_entities": ["light.1", "switch.fake_relay"]},
+     "proactive_triggers": ["when sensor.0 changes"]},
+    {"id": "a2", "name": "Olha", "role": "Manager", "tone_of_voice": "bubbly",
+     "permissions": {"read_only_entities": [], "execute_entities": ["trello.card.3"]},
+     "proactive_triggers": []}
+  ]
+}
+```"""
 
     meta = MetaAgent(llm_fn=lambda sys, usr: fake_llm_json)
     config = meta.generate(entities, "Production studio")
 
-    all_tools = {t for a in config.agents for t in a.assigned_tools}
-    assert "ghost.does_not_exist" not in all_tools
-    assert all(t in valid_ids for t in all_tools)
-    assert all(trig.entity_id in valid_ids for a in config.agents for trig in a.proactive_triggers)
+    all_entities = {eid for a in config.agents for eid in a.permissions.all_entities()}
+    assert "ghost.does_not_exist" not in all_entities
+    assert "switch.fake_relay" not in all_entities
+    assert all(eid in valid_ids for eid in all_entities)
+
+
+def test_meta_agent_system_prompt_enforces_strict_json_and_jail():
+    from agile_agentic_os.meta import META_AGENT_SYSTEM_PROMPT
+
+    # The prompt must encode the hard constraints we rely on downstream.
+    assert "СУВОРА ЗАБОРОНА" in META_AGENT_SYSTEM_PROMPT
+    assert "entity_id" in META_AGENT_SYSTEM_PROMPT
+    assert "read_only_entities" in META_AGENT_SYSTEM_PROMPT
+    assert "execute_entities" in META_AGENT_SYSTEM_PROMPT
+    assert "ВИКЛЮЧНО у форматі валідного JSON" in META_AGENT_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -119,8 +131,10 @@ async def test_hot_reload_without_process_restart():
     gen1 = orch.hot_reloader.generation
     agents_v1 = set(orch.agents.keys())
     instances_v1 = list(orch.agents.values())
-    assert len(agents_v1) >= 3
+    assert 2 <= len(agents_v1) <= 4
     assert all(a.alive for a in instances_v1)
+    # NL proactive triggers were compiled and bound to real entities.
+    assert all(t.entity_id in cfg1.entity_ids() for t in orch.hot_reloader.compiled_triggers)
 
     # Apply a brand-new domain config at runtime.
     cfg2 = orch.boot("Production studio")

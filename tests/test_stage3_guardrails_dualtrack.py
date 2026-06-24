@@ -5,6 +5,8 @@
   by the middleware, returning a detailed error into the agent context.
 """
 
+import asyncio
+
 import pytest
 
 from agile_agentic_os.bridge import EventBus, HardwareAdapter, MCPServer, SoftwareAdapter
@@ -109,14 +111,53 @@ async def test_rate_limiter_blocks_flood():
 
 
 @pytest.mark.asyncio
-async def test_slow_track_reacts_to_completed_action():
+async def test_slow_track_async_queue_reacts_to_completed_action():
     from agile_agentic_os.routing import SlowTrackSpawner
 
     bus, mcp = _build_mcp()
     slow = SlowTrackSpawner(bus)
     slow.register_interest("ops_agent", "switch.*")
 
+    # Fast Track action completes immediately; the reflection is only *queued*.
     await mcp.execute_action("switch.server_rack", "turn_off", {}, actor="user")
-    # Allow the subscriber coroutine(s) to run.
-    assert slow.reactions, "slow track should have produced a reaction"
-    assert slow.reactions[0]["agent"] == "ops_agent"
+    assert slow.reactions == []  # decoupled -- nothing generated synchronously
+    assert not slow.queue.empty()
+
+    # The Slow Track worker drains the queue and produces the in-character reply.
+    processed = await slow.drain()
+    assert processed == 1
+    assert slow.reactions and slow.reactions[0]["agent"] == "ops_agent"
+
+
+@pytest.mark.asyncio
+async def test_slow_track_worker_loop_processes_in_background():
+    from agile_agentic_os.routing import SlowTrackSpawner
+
+    bus, mcp = _build_mcp()
+    slow = SlowTrackSpawner(bus, reflection_delay=0.0)
+    slow.register_interest("petrovych", "climate.*")
+    slow.start()
+
+    await mcp.execute_action("climate.living_room", "turn_off", {}, actor="user")
+    # Give the background worker a moment to wake up and react.
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if slow.reactions:
+            break
+    await slow.stop()
+    assert slow.reactions and slow.reactions[0]["agent"] == "petrovych"
+
+
+@pytest.mark.asyncio
+async def test_fast_track_vector_classifier_matches_command():
+    from agile_agentic_os.routing import FastTrackInterceptor, VectorIntentClassifier
+
+    _, mcp = _build_mcp()
+    fast = FastTrackInterceptor(mcp, classifier=VectorIntentClassifier(min_score=0.1))
+
+    result = await fast.try_handle("please turn off the kitchen light", actor="user")
+    assert result is not None
+    assert result["ok"] is True
+    assert result["intent"]["entity_id"] == "light.kitchen"
+    assert result["intent"]["action_type"] == "turn_off"
+    assert result["latency_ms"] < 200.0

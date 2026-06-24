@@ -28,10 +28,13 @@ class Agent:
         return self.spec.id
 
     def system_message(self) -> dict:
+        perms = self.spec.permissions
         prompt = self.spec.system_prompt or (
-            f"You are '{self.spec.id}', role: {self.spec.role}. "
-            f"Tone: {self.spec.tone_of_voice}. "
-            f"You may operate: {', '.join(self.spec.assigned_tools) or 'nothing'}."
+            f"You are '{self.spec.name}' ({self.spec.id}), role: {self.spec.role}. "
+            f"Character: {self.spec.tone_of_voice} "
+            f"You may actuate: {', '.join(perms.execute_entities) or 'nothing'}. "
+            f"You may monitor (read-only): {', '.join(perms.read_only_entities) or 'nothing'}. "
+            f"Stay strictly in character and never act outside your tools."
         )
         return {"role": "system", "content": prompt}
 

@@ -85,22 +85,24 @@ class Orchestrator:
     def add_adapter(self, adapter: Adapter) -> None:
         adapter.bus = adapter.bus or self.bus
         self.mcp.register_adapter(adapter)
-        self.fast_track.classifier.index_entities([e.entity_id for e in adapter.discover()])
+        # Re-learn the full catalogue (works for regex or vector classifiers).
+        self.fast_track.classifier.learn(self.mcp.list_entities())
 
     # --- boot an org chart (Stage 4) ----------------------------------
-    def boot(self, domain: str) -> OSConfig:
+    def boot(self, lore: str) -> OSConfig:
         entities = self.discovery.discover()
-        config = self.meta.generate(entities, domain)
-        self.apply_config(config)
+        config = self.meta.generate(entities, lore)
+        self.apply_config(config, entities)
         return config
 
-    def apply_config(self, config: OSConfig) -> dict:
-        summary = self.hot_reloader.apply(config)
-        # register a2a zones from assigned tools
+    def apply_config(self, config: OSConfig, entities=None) -> dict:
+        entities = entities if entities is not None else self.discovery.discover()
+        summary = self.hot_reloader.apply(config, entities)
+        # register a2a zones over every entity each agent owns (read or execute)
+        self.a2a._zones.clear()
         for spec in config.agents:
-            for tool in spec.assigned_tools:
-                self.a2a.register_zone(spec.id, tool)
-        # grant guardrail permissions already applied by hot_reloader
+            for eid in spec.permissions.all_entities():
+                self.a2a.register_zone(spec.id, eid)
         return summary
 
     # --- lifecycle -----------------------------------------------------

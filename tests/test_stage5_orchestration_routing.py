@@ -12,7 +12,7 @@ from agile_agentic_os.agents.agent import Agent
 from agile_agentic_os.bridge import EventBus, HardwareAdapter
 from agile_agentic_os.bridge.events import EventKind, SystemEvent
 from agile_agentic_os.config import Settings
-from agile_agentic_os.meta.schema import AgentSpec, ProactiveTrigger
+from agile_agentic_os.meta.schema import AgentSpec, CompiledTrigger
 from agile_agentic_os.orchestration import AgentToAgentRouter, ProactiveTriggerEngine
 from agile_agentic_os.routing import LLMRouter, RouteTag
 
@@ -28,8 +28,9 @@ async def test_two_agents_exchange_five_replies_from_trigger_event():
 
     a2a = AgentToAgentRouter(bus, agents)
     proactive = ProactiveTriggerEngine(bus)
-    proactive.register("producer", ProactiveTrigger(
-        id="power_high", entity_id="sensor.power_total", operator=">", threshold=5,
+    proactive.register("producer", CompiledTrigger(
+        id="power_high", agent_id="producer", entity_id="sensor.power_total",
+        operator=">", threshold=5,
         reaction="@director power draw exceeded 5kW, what's our plan?",
     ))
 
@@ -103,3 +104,47 @@ def test_tool_use_forces_premium_even_when_untagged():
     assert decision.tag == RouteTag.ACTION_REQUIRED
     assert decision.paid is True
     assert decision.tier == "premium"
+
+
+def test_trigger_parser_compiles_natural_language_to_state_conditions():
+    from agile_agentic_os.bridge.adapters.base import Entity, EntityKind
+    from agile_agentic_os.orchestration import TriggerParser
+
+    entities = [
+        Entity(entity_id="sensor.power_total", kind=EntityKind.SENSOR),
+        Entity(entity_id="sensor.living_room_temp", kind=EntityKind.SENSOR),
+        Entity(entity_id="light.kitchen", kind=EntityKind.ACTUATOR, actions=["turn_on", "turn_off"]),
+    ]
+    parser = TriggerParser(entities)
+
+    # English: "exceeds 5" -> '>' 5 on the power sensor.
+    t1 = parser.parse("eng_eng", "when power consumption exceeds 5 kW")
+    assert t1 and t1.entity_id == "sensor.power_total" and t1.operator == ">" and t1.threshold == 5.0
+
+    # Ukrainian: "падає нижче 18" -> '<' 18 on the temperature sensor.
+    t2 = parser.parse("ua", "коли температура падає нижче 18")
+    assert t2 and t2.entity_id == "sensor.living_room_temp" and t2.operator == "<" and t2.threshold == 18.0
+
+    # "turns on" -> categorical == "on" on the light.
+    t3 = parser.parse("ua2", "коли вмикається світло вночі")
+    assert t3 and t3.entity_id == "light.kitchen" and t3.operator == "==" and t3.threshold == "on"
+
+    # Unresolvable / no entity -> dropped (no hallucinated binding).
+    assert parser.parse("x", "when the coffee machine is happy") is None
+
+
+@pytest.mark.asyncio
+async def test_proactive_fires_on_compiled_string_trigger_via_orchestrator():
+    from agile_agentic_os.orchestration import Orchestrator
+    from agile_agentic_os.bridge import HardwareAdapter
+
+    orch = Orchestrator()
+    orch.add_adapter(HardwareAdapter())
+    orch.boot("Smart Home")
+
+    # Drive the temperature sensor above the compiled threshold (28).
+    await orch.bus.publish(SystemEvent(
+        kind=EventKind.STATE_CHANGED, source="home_assistant",
+        entity_id="sensor.living_room_temp", attribute="state", value=31,
+    ))
+    assert orch.proactive.fired, "a compiled NL trigger should have fired"
