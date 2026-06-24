@@ -58,6 +58,7 @@ class Orchestrator:
         self.slow_track = SlowTrackSpawner(self.bus)
 
         # Stage 5: life + comms
+        self.config: OSConfig | None = None
         self.agents: dict[str, Agent] = {}
         self.proactive = ProactiveTriggerEngine(self.bus)
         self.a2a = AgentToAgentRouter(self.bus, self.agents)
@@ -97,6 +98,7 @@ class Orchestrator:
 
     def apply_config(self, config: OSConfig, entities=None) -> dict:
         entities = entities if entities is not None else self.discovery.discover()
+        self.config = config
         summary = self.hot_reloader.apply(config, entities)
         # register a2a zones over every entity each agent owns (read or execute)
         self.a2a._zones.clear()
@@ -104,6 +106,20 @@ class Orchestrator:
             for eid in spec.permissions.all_entities():
                 self.a2a.register_zone(spec.id, eid)
         return summary
+
+    # --- opencode backend integration ---------------------------------
+    def export_opencode_project(self, out_dir: str, **kwargs) -> dict:
+        """Materialise the current org chart as a runnable opencode project.
+
+        Writes ``opencode.json`` (mcp + models) and ``.opencode/agent/*.md`` so
+        the real opencode engine drives these agents against the I/O bridge.
+        """
+        if getattr(self, "config", None) is None:
+            raise RuntimeError("no config booted yet; call boot() first")
+        from ..integrations.opencode import OpencodeProjectGenerator
+
+        generator = OpencodeProjectGenerator(settings=self.settings, router=self.router, **kwargs)
+        return generator.generate(self.config, out_dir)
 
     # --- lifecycle -----------------------------------------------------
     def start(self) -> asyncio.Task:

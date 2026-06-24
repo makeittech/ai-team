@@ -1,11 +1,49 @@
 # Agile Agentic OS
 
-A continuous (infinite-session) multi-agent operating system inspired by the
-`opencode` philosophy. Work is split into a **Fast Track** (deterministic,
-LLM-free command execution) and a **Slow Track** (generative, in-character agent
-behaviour). The OS talks to the physical and software world through a Universal
-I/O Bridge exposed via the Model Context Protocol (MCP), and enforces strict
-backend **Guardrails** (RBAC, payload limits, rate limiting).
+A continuous (infinite-session) multi-agent operating system that uses
+**[opencode](https://github.com/anomalyco/opencode) as its agent backend**. Work
+is split into a **Fast Track** (deterministic, LLM-free command execution) and a
+**Slow Track** (generative, in-character agent behaviour). The OS talks to the
+physical and software world through a Universal I/O Bridge exposed via the Model
+Context Protocol (MCP), and enforces strict backend **Guardrails** (RBAC, payload
+limits, rate limiting).
+
+## opencode as the backend (the "context substitution" hack)
+
+Instead of writing a tool-calling / sub-agent engine from scratch, we run
+opencode and **swap its context**: instead of a filesystem + GitHub we hand it
+**physical devices + software APIs** through MCP.
+
+```
+opencode (TS engine)  ──MCP stdio──▶  agile_agentic_os.integrations.opencode.mcp_stdio
+   subagents/tools                        │  get_state · execute_action · recall_memory
+   (.opencode/agent/*.md)                 ▼
+                                    I/O Bridge + Guardrails ──▶ Home Assistant / GitHub / Jira / Trello
+```
+
+* `integrations/opencode/mcp_stdio.py` — a real MCP (JSON-RPC 2.0 over stdio)
+  server opencode launches via its `mcp` config; exposes our bridge tools with
+  per-agent RBAC enforced by Guardrails.
+* `integrations/opencode/config_gen.py` — `OpencodeProjectGenerator` turns a
+  Meta-Agent `OSConfig` into a runnable opencode project: `opencode.json`
+  (`mcp` + cost-aware `model`/`small_model`) and `.opencode/agent/*.md` personas
+  with per-agent tool gating.
+* `integrations/opencode/runner.py` — drives `opencode run --agent ...` headless
+  to power the Slow Track on real models.
+
+Verified end-to-end against opencode v1.17.9: the real CLI loads the generated
+project and reports every generated MCP server as `✓ connected`
+(`tests/test_stage6_opencode_backend.py`).
+
+```python
+from agile_agentic_os.orchestration import Orchestrator
+from agile_agentic_os.bridge import HardwareAdapter, SoftwareAdapter
+
+orch = Orchestrator()
+orch.add_adapter(HardwareAdapter()); orch.add_adapter(SoftwareAdapter())
+orch.boot("серйозна веб-студія")
+orch.export_opencode_project("./my-space")   # then: cd my-space && opencode
+```
 
 Everything runs with **zero external infrastructure** by default (in-process
 event bus, in-memory vector store, mock LLM router). Optional integrations
@@ -20,6 +58,7 @@ event bus, in-memory vector store, mock LLM router). Optional integrations
 | 3 | Guardrails middleware (RBAC, limits, rate limit), Fast Track interceptor, Slow Track spawning | `agile_agentic_os/guardrails`, `agile_agentic_os/routing` | `tests/test_stage3_guardrails_dualtrack.py` |
 | 4 | Meta-Agent: auto-discovery, config wizard, hot-reload | `agile_agentic_os/meta` | `tests/test_stage4_meta_agent.py` |
 | 5 | Proactive triggers, agent-to-agent comms, dynamic LLM routing | `agile_agentic_os/orchestration`, `agile_agentic_os/routing` | `tests/test_stage5_orchestration_routing.py` |
+| opencode backend | MCP stdio bridge, project/agent generation, headless runner | `agile_agentic_os/integrations/opencode` | `tests/test_stage6_opencode_backend.py` |
 
 ## Dual-Track architecture
 
